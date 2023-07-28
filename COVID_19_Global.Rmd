@@ -1,0 +1,248 @@
+# Global COVID-19 Cases and Deaths  
+  
+  
+**Doris Chen**  
+  
+**2023-07-28**  
+  
+***  
+    
+## Introduction  
+  
+COVID-19 pandemic has swept across the world, affecting each of us in varying degrees over the past three years. We are looking into the data from Johns Hopkins University, trying to discover the trends and patterns regarding global COVID-19 cases and deaths. [Data Source](https://github.com/CSSEGISandData/COVID-19/tree/master/csse_covid_19_data)
+
+ 
+## Load Packages and Data
+
+##### Load packages
+
+```{r message = FALSE}
+library(tidyverse)
+library(lubridate)
+library(maps)
+library(scales)
+```
+
+##### Import data
+```{r get_jhu_data, message = FALSE}
+url_in <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/"
+file_names <- c("time_series_covid19_confirmed_global.csv", "time_series_covid19_deaths_global.csv")
+urls <- str_c(url_in, file_names)  ## string concatenate, element-wise joined
+global_cases <- read_csv(urls[1])
+global_deaths <- read_csv(urls[2])
+```
+    
+##### Look at the data  
+  
+```{r results='hide'}
+str(global_cases)
+str(global_deaths)
+```
+  
+The results are too long, so I set `results='hide'` to avoid a super long list in the report.  
+  
+There are 289 observations of 1147 variables in both tables. Most of the variables are date. We are going to convert both tables from wide to long.    
+  
+  
+## Data Cleaning and Transforming   
+  
+Pivot data from wide to long, and remove Lat, Long from the data.  
+  
+  
+```{r}
+global_cases <- global_cases %>% 
+        pivot_longer(cols = -c('Province/State', 'Country/Region', Lat, Long), 
+                     names_to = "date", values_to = "cases" ) %>% 
+        select(-c(Lat, Long))
+
+global_deaths <- global_deaths %>% 
+        pivot_longer(cols = -c('Province/State', 'Country/Region', Lat, Long), 
+                     names_to = "date", values_to = "deaths" ) %>% 
+        select(-c(Lat, Long))
+```
+  
+  
+Join two tables into one and filter the data with cases greater than 0.  
+  
+```{r transform global data, message=FALSE}
+global <- global_cases %>% 
+        full_join(global_deaths) %>% 
+        dplyr::rename(Country_Region = "Country/Region", Province_State = "Province/State") %>% 
+        mutate(date = mdy(date))
+
+global <- global %>% 
+        filter(cases > 0)
+
+```
+
+  
+Add population data to global.  
+  
+```{r}
+uid_lookup_url <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/UID_ISO_FIPS_LookUp_Table.csv"
+uid <- read_csv(uid_lookup_url, show_col_types = FALSE) %>% 
+        select(-c(Lat, Long_, Combined_Key, code3, iso2, iso3, Admin2))
+global <- global %>% 
+        left_join(uid, by = c("Province_State", "Country_Region")) %>% 
+        select(-c(UID, FIPS)) %>% 
+        select(Province_State, Country_Region, date, cases, deaths, Population)
+
+```
+  
+    
+Create a new table "global_trend" to see the global trend of new cases and new deaths by time.   
+  
+```{r}
+global_trend <- global %>% 
+        group_by(date) %>% 
+        summarize(cases = sum(cases), deaths = sum(deaths)) %>% 
+        mutate(new_cases = cases - lag(cases), new_deaths = deaths - lag(deaths)) %>% 
+        select(date, new_cases, new_deaths) %>% 
+        ungroup()
+        
+```
+  
+Create a new table "country_total" to compare total cases and deaths in different countries.  
+  
+  
+```{r message=FALSE}
+country_total <- global %>% 
+        filter(!is.na(Population)) %>% 
+        group_by(Country_Region, date) %>% 
+        summarize(cases = sum(cases), deaths = sum(deaths), Population = sum(Population)) %>% 
+        group_by(Country_Region) %>% 
+        summarize(cases = max(cases), deaths = max(deaths), Population = max(Population)) %>% 
+        mutate(cases_per_million = cases * 1000000 / Population, 
+               deaths_per_million = deaths * 1000000 / Population) %>% 
+        select(Country_Region, cases, deaths, cases_per_million, deaths_per_million, Population) %>% 
+        ungroup()
+```
+  
+
+We also create a new table "country_map", which we need to modify some country names to match the name in the world map data from "maps" package. So we can draw a heat map later.  
+  
+  
+```{r}
+world_map <- map_data("world")
+world_map <- subset(world_map, region != "Antarctica")
+```
+  
+```{r message=FALSE}
+global$Country_Region[global$Province_State == "Greenland"] <- "Greenland"
+
+country_map <- global %>% 
+        filter(!is.na(Population)) %>% 
+        group_by(Country_Region, date) %>% 
+        summarize(cases = sum(cases), deaths = sum(deaths), Population = sum(Population)) %>% 
+        group_by(Country_Region) %>% 
+        summarize(cases = max(cases), deaths = max(deaths), Population = max(Population)) %>% 
+        select(Country_Region, cases, deaths) %>% 
+        ungroup()
+
+country_map$Country_Region[country_map$Country_Region == "US"] <- "USA"
+country_map$Country_Region[country_map$Country_Region == "Congo (Kinshasa)"] <- "Democratic Republic of the Congo"
+country_map$Country_Region[country_map$Country_Region == "Congo (Brazzaville)"] <- "Republic of Congo"
+country_map$Country_Region[country_map$Country_Region == "Korea, North"] <- "North Korea"
+country_map$Country_Region[country_map$Country_Region == "Korea, South"] <- "South Korea"
+country_map$Country_Region[country_map$Country_Region == "Burma"] <- "Myanmar"
+country_map$Country_Region[country_map$Country_Region == "Cote d'Ivoire"] <- "Ivory Coast"
+country_map$Country_Region[country_map$Country_Region == "United Kingdom"] <- "UK"
+```
+  
+    
+## Data Analysis and Visualization  
+  
+We are going to discover the data to answer a few questions.  
+  
+**Question 1: What is the global trend of COVID-19 new cases and new deaths over the last 3 years?**  
+  
+```{r warning=FALSE, fig.width=8}
+global_trend %>% 
+        ggplot(aes(x = date, y = new_cases)) +
+        geom_line(aes(color = "new_cases")) +
+        geom_point(aes(color = "new_cases")) +
+        geom_line(aes(y = new_deaths, color = "new_deaths")) +
+        geom_point(aes(y = new_deaths, color = "new_deaths")) + 
+        scale_y_log10() +
+        theme(legend.position = "bottom", legend.title = element_blank(),
+              axis.text.x = element_text(angle = 90)) +
+        labs(title = "Global Trend of COVID-19", subtitle = "New Cases & New Deaths", x = "Date", y = '')
+```
+  
+As we can see from the plot, the new cases and new deaths was increasing rapidly during the year 2020 to 2021, then slowly decreasing from 2022 to 2023.  
+  
+   
+**Question 2: What are the top 5 countries with the HIGHEST COVID-19 fatality rate?**    
+  
+   
+```{r}
+country_total %>% 
+        slice_max(deaths_per_million, n = 5) 
+```
+  
+  
+Pero, Bulgaria, Hungary, Bosnia and Herzegovina, North Macedonia are the top 5 countries with the highest COVID-19 fatality rate.  
+
+    
+**Question 3: What are the top 5 countries with the LOWEST COVID-19 fatality rate?**     
+  
+    
+```{r}
+country_total %>% 
+        slice_min(deaths_per_million, n = 5)
+```
+   
+ The five countries with the lowest COVID-19 fatality rate are Holy See, Tuvalu, North Korea, Burundi, Chad.  
+   
+   
+**Question4: How many total deaths caused by COVID-19 in every country?**  
+   
+     
+```{r fig.width=8}
+ggplot(country_map) +
+        geom_map(dat = world_map, map = world_map, aes(map_id = region),
+                fill = "white", color = "lightgrey", linewidth = 0.25) +
+        geom_map(map = world_map, aes(map_id = Country_Region, fill = deaths), linewidth = 0.25) +
+        scale_fill_gradient(low = "lightyellow", high = "darkorange", labels = comma) +
+        expand_limits(x = world_map$long, y = world_map$lat) +
+        labs(title = "Global COVID-19 Deaths", subtitle = "2020-01-22 ~ 2023-03-09") +
+        theme(legend.title = element_blank())
+```
+  
+    
+There are a few countries showing 0 deaths in the map. For example, Turkmenistan. I checked on WHO website, it says "In Turkmenistan, from 3 January 2020 to 8:14am CEST, 26 July 2023, there have been 0 confirmed cases of COVID-19 with 0 deaths, reported to WHO".   
+  
+  
+## Data Model  
+  
+We'll build a simple linear model to see the correlation between death_per_million and cases_per_million  
+```{r}
+mod <- lm(deaths_per_million ~ cases_per_million, data = country_total)
+summary(mod)
+```
+  
+The p-value shows the statistical significance. But the adjusted R-squared is only 0.2559, meaning the model can only explained 25.59% of the variance. Apparently, there are many more other factors affecting the fatality rate, such as vaccination rate, country policy, medical care, and so on.  
+  
+## Conclusion  
+  
+From the data, we have three findings as following:  
+
+1. The global COVID-19 cases and deaths was increasing rapidly from 2020 to 2021, and decreasing slowly from 2022 to 2023.   
+2. The top 5 countries with the highest fatality rate are Pero, Bulgaria, Hungary, Bosnia and Herzegovina, North Macedonia, while Holy See, Tuvalu, North Korea, Burundi, Chad are the countries with the lowest COVID-19 fatality rate.  
+3. Our linear model shows that cases per million has significance affect on deaths per million, but the model can only explained 25.59% of the variance, which means there are many more other factors affecting the COVID-19 fatality rate.  
+  
+    
+## Bias Identification  
+  
+The COVID-19 pandemic has had different degrees of impact on all of us. Therefore, when analyzing the data of global cases and deaths, it is inevitable that we may bring some personal emotions, especially when I saw the huge number of deaths. The awareness reminded me to put away the bias, just look into the data, let the data tell the story.  
+
+We only take into account of the population factor in this analysis, which is far from enough. The factors influencing COVID-19 fatality rate are complex and diverse. This can be considered bias at the data level.  
+  
+  
+## Appendix    
+  
+```{r}
+sessionInfo()
+```
+  
+  
